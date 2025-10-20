@@ -175,10 +175,10 @@ class VAE(nn.Module):
         
         # Reconstruction loss
         if self.likelihood == "gaussian":
-            # MSE loss (scaled by feature dimension for consistency)
+            # MSE loss
             recon_loss = F.mse_loss(recon, x, reduction="sum") / batch_size
         elif self.likelihood == "bernoulli":
-            # Binary cross-entropy (with logits for numerical stability)
+            # Binary cross-entropy 
             recon_loss = F.binary_cross_entropy_with_logits(recon, x, reduction="sum") / batch_size
         else:
             raise ValueError(f"Unknown likelihood: {self.likelihood}")

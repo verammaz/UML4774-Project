@@ -5,6 +5,7 @@ Trains VAE with optional W&B logging.
 import os
 import sys
 import json
+import glob
 
 import torch
 from torch.utils.data import TensorDataset
@@ -28,7 +29,7 @@ def get_config():
     # wandb
     C.wandb = CN()
     C.wandb.enabled = False
-    C.wandb.project = 'vae-experiments'
+    C.wandb.project = 'kmeans-vae'
     C.wandb.entity = None  # Your wandb username/team
     C.wandb.name = None  # Run name (auto-generated if None)
     C.wandb.tags = []  # List of tags
@@ -37,7 +38,7 @@ def get_config():
 
     # data
     C.data = CN()
-    C.data.data_dir = 'data/data_set/gaussian_raw'
+    C.data.data_dir = None
 
     # model
     C.model = VAE.get_default_config()
@@ -54,6 +55,12 @@ if __name__ == "__main__":
     # Get and merge config
     config = get_config()
     config.merge_from_args(sys.argv[1:])
+
+    # Check data directory is provided
+    if config.data.data_dir is None:
+        print()
+        sys.exit() 
+    
     print("Configuration:")
     print(config)
     print()
@@ -61,7 +68,7 @@ if __name__ == "__main__":
     # Set seed
     set_seed(config.system.seed)
     
-        # Load training data
+    # Load training data
     print(f"Loading dataset from {config.data.data_dir}")
     data = load_and_split(
         config.data.data_dir,
@@ -81,8 +88,15 @@ if __name__ == "__main__":
     print(f"Classes:   {len(torch.unique(y_train))}")
     print()
 
-    input_dim = X_train.shape[1]
-    k = len(torch.unique(y_train))
+
+    # Auto-generate model name if not provided
+    if config.model.name is None:
+        dataset_name = 'gaus' if 'gaussian' in config.data.data_dir else 'ber'
+        k = len(torch.unique(y_train))
+        config.model.name = f"vae_{dataset_name}_i{X_train.shape[1]}_k{k}_z{config.model.latent_dim}_beta{config.model.kl_beta}"
+    
+    # Setup logging (creates out_dir)
+    setup_logging(config)
 
     # Initialize wandb if enabled
     wandb_run = None
@@ -92,8 +106,7 @@ if __name__ == "__main__":
             
             # Auto-generate run name if not provided
             if config.wandb.name is None:
-                dataset_name = 'gaus' if 'gaussian' in config.data.data_dir else 'ber'
-                config.wandb.name = f"vae_{dataset_name}_i{input_dim}_k{k}_z{config.model.latent_dim}_beta{config.model.kl_beta}"
+                config.wandb.name = config.model.name
             
             wandb_run = wandb.init(
                 project=config.wandb.project,
@@ -111,26 +124,21 @@ if __name__ == "__main__":
             print("Continuing without W&B logging.\n")
             config.wandb.enabled = False
     
-    # Setup logging (creates out_dir)
-    dataset_name = 'gaus' if 'gaussian' in config.data.data_dir else 'ber'
-    config.model.name = f"vae_{dataset_name}_i{input_dim}_k{k}_z{config.model.latent_dim}_beta{config.model.kl_beta}"
-    setup_logging(config)
-
 
     # Get model config and verify likelihood matches data type
     model_config = config.model 
     
-    with open(os.path.join(config.data.data_dir, "metadata.json")) as f:
-        meta = json.load(f)
     
     # Auto-detect likelihood from metadata
+    with open(os.path.join(config.data.data_dir, "metadata.json")) as f:
+        meta = json.load(f)
     data_likelihood = meta['type']  # 'gaussian' or 'bernoulli'
     if model_config.likelihood != data_likelihood:
         print(f"Info: Setting model likelihood to '{data_likelihood}' (from dataset metadata)")
         model_config.likelihood = data_likelihood
     
     print(f"Creating VAE model:")
-    print(f"  Input dim:    {input_dim}")
+    print(f"  Input dim:    {X_train.shape[1]}")
     print(f"  Latent dim:   {model_config.latent_dim}")
     print(f"  Hidden dims:  {model_config.hidden_dims}")
     print(f"  Likelihood:   {model_config.likelihood}")
@@ -140,7 +148,7 @@ if __name__ == "__main__":
 
     # Create model
     model = VAE(
-        input_dim=input_dim,
+        input_dim=X_train.shape[1],
         latent_dim=model_config.latent_dim,
         hidden_dims=model_config.hidden_dims,
         likelihood=model_config.likelihood,
@@ -248,11 +256,17 @@ if __name__ == "__main__":
         'config': config.to_dict(),
         'test_stats': test_stats,
     }, final_model_path)
+
     print(f"\nSaved final model to {final_model_path}")
     
     if config.wandb.enabled:
         # Save final model to wandb
         wandb.save(final_model_path)
+
+        # Save data to wandb
+        data_files = glob.glob(os.path.join(config.data.data_dir, "*"))
+        for fpath in data_files:
+            wandb.save(fpath)
         
         # Log final summary
         wandb.run.summary["final_test_loss"] = test_stats['loss']
