@@ -40,10 +40,6 @@ def get_vae_model_config(checkpoint: dict):
             "activation": model_config.get('activation', 'LeakyReLU')}
 
 
-
-# ---------------------------------------------------------------------
-# ---- KMeans experiment runner ---------------------------------------
-# ---------------------------------------------------------------------
 def run_kmeans_experiment(data_dir: str, vae_path: str, n_clusters: int = None):
 
     data_meta = get_data_metadata(data_dir)
@@ -112,7 +108,7 @@ def run_kmeans_experiment(data_dir: str, vae_path: str, n_clusters: int = None):
                         res_latent=res_latent, 
                         data_meta=data_meta, 
                         vae_meta=vae_config, ) 
-    # Save cluster centers & embeddings separately (gzipped) 
+    # Save cluster centers & embeddings separately 
     save_compressed_array(os.path.join(out_dir, "centers_input.npy.gz"), kmeans_input.centroids()) 
     save_compressed_array(os.path.join(out_dir, "centers_latent.npy.gz"), kmeans_latent.centroids()) 
     save_compressed_array(os.path.join(out_dir, "embeddings_latent.npy.gz"), Z)
@@ -120,9 +116,6 @@ def run_kmeans_experiment(data_dir: str, vae_path: str, n_clusters: int = None):
     print(f"\nResults saved to {out_dir}")
 
 
-# ---------------------------------------------------------------------
-# ---- CLI entrypoint -------------------------------------------------
-# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Run KMeans on input and latent spaces")
     parser.add_argument("--data_dir", type=str, required=True,
