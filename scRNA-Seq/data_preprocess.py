@@ -2,7 +2,7 @@ import scanpy as sc
 import sys
 import yaml
 
-from data_load import load_hd5a
+import data_utils
 
 
 def preprocess(adata, min_cells=3, n_top_genes=2000, subset_hgv=True, max_value=10, target_sum=1e4):
@@ -32,7 +32,7 @@ def main():
     with open(params_file, 'r') as stream:
         params = yaml.safe_load(stream)  
     
-    adata = load_hd5a(params['expression'])
+    adata = data_utils.load_hd5a(params['expression'])
 
     processed_adata = preprocess(adata)
 

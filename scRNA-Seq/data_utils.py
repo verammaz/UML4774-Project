@@ -57,11 +57,12 @@ def create_proportional_subset_h5ad(
     output_h5ad='subset_expression.h5ad',
     output_meta_csv='subset_metadata.csv',
     max_cells=5000,
-    celltype_col='class_label',
+    celltype_col='subclass_label',
+    min_prop=0.001,
     random_state=42,
-    chunk_size=500
+    chunk_size=1000,
 ):
-    
+
     rng = np.random.default_rng(random_state)
 
     # Load metadata
@@ -71,13 +72,13 @@ def create_proportional_subset_h5ad(
     meta['sample_name'] = meta['sample_name'].astype(str).str.strip()
     meta = meta.set_index('sample_name')
 
-    # Open HDF5 file and inspect structure
+    # Inspect HDF5
     with h5py.File(expr_path, 'r') as f:
         n_genes, n_samples = f['data']['counts'].shape
-        print(f"Expression matrix shape: {n_genes:,} genes x {n_samples:,} samples")
+        print(f"Expression matrix: {n_genes:,} genes × {n_samples:,} cells")
 
-    # Build a mapping of sample_name → index without loading all names
-    print("Building sample name → index mapping (streaming in chunks)...")
+    # Build mapping sample → index
+    print("Building sample name → index map...")
     sample_to_idx = {}
     with h5py.File(expr_path, 'r') as f:
         sample_ds = f['data']['samples']
@@ -88,62 +89,65 @@ def create_proportional_subset_h5ad(
             for i, name in enumerate(chunk, start):
                 if name in meta.index:
                     sample_to_idx[name] = i
+
     print(f"Found {len(sample_to_idx)} overlapping samples")
+    assert len(sample_to_idx) > 0, "No overlapping cells found."
 
-    if len(sample_to_idx) == 0:
-        raise ValueError("No overlapping samples between metadata and HDF5")
-
-    # Restrict metadata to only those overlapping samples
     meta = meta.loc[meta.index.intersection(sample_to_idx.keys())]
 
-    # Compute proportional sample sizes per cell type
+    # Proportions
     type_counts = meta[celltype_col].value_counts()
     proportions = type_counts / type_counts.sum()
-    
+
+    print("Original proportions:")
     print(proportions)
 
+    # Skip small labels
+    valid_labels = [
+        ct for ct in proportions.index
+        if proportions[ct] >= min_prop
+    ]
+
+    print(f"Skipping labels: {set(proportions.index) - set(valid_labels)}")
+    print(f"Using labels: {valid_labels} ({len(valid_labels)})")
+
+    proportions = proportions.loc[valid_labels]
+    type_counts = type_counts.loc[valid_labels]
+
+    # Determine sample sizes
     n_cells_per_type = (proportions * max_cells).round().astype(int)
     n_cells_per_type[n_cells_per_type == 0] = 1
-   
+
     sampled_cells = []
     for ct, n in n_cells_per_type.items():
         ct_cells = meta.index[meta[celltype_col] == ct].tolist()
         n_pick = min(n, len(ct_cells))
         sampled_cells.extend(rng.choice(ct_cells, size=n_pick, replace=False))
 
-    
     subset_idx = [sample_to_idx[s] for s in sampled_cells]
     subset_idx_sorted = np.sort(subset_idx)
-    print(f"Sampling {len(subset_idx_sorted)} total cells across {len(n_cells_per_type)} cell types")
 
-    # Load gene names (small, safe to load fully)
+    print(f"Sampling {len(subset_idx_sorted)} cells from {len(valid_labels)} labels.")
+
+    # Load genes
     with h5py.File(expr_path, 'r') as f:
         genes = [g.decode('utf-8') for g in f['data']['gene']]
 
-    # Load subset of expression matrix
-    print("Reading subset of expression matrix (this may take a few minutes)...")
-
-    # Load expression matrix subset in chunks
-    print(f"Loading expression data in chunks of {chunk_size} cells...")
+    # Read expression subset
+    print("Reading expression matrix...")
     chunks = []
 
     with h5py.File(expr_path, 'r') as f:
-        counts_dset = f['data']['counts']
-        for start in tqdm(
-            range(0, len(subset_idx_sorted), chunk_size),
-            desc="Reading expression chunks",
-            unit="chunk"
-        ):
+        dset = f['data']['counts']
+        for start in tqdm(range(0, len(subset_idx_sorted), chunk_size)):
             end = min(start + chunk_size, len(subset_idx_sorted))
             idx_chunk = subset_idx_sorted[start:end]
-            # Read genes x cells chunk, then transpose
-            chunk = counts_dset[:, idx_chunk].T.astype(np.float32)
-            print(chunk)
+            chunk = dset[:, idx_chunk].T.astype(np.float32)
             chunks.append(chunk)
 
     counts_subset = np.vstack(chunks)
 
-    # Create AnnData and save
+    # Build AnnData
     adata = ad.AnnData(X=counts_subset)
     adata.var_names = genes
     adata.obs_names = sampled_cells
@@ -152,10 +156,11 @@ def create_proportional_subset_h5ad(
     adata.write(output_h5ad)
     adata.obs.to_csv(output_meta_csv)
 
-    print(f"Saved subset AnnData (shape {adata.shape}) {output_h5ad}")
-    print(f"Saved subset metadata (shape {adata.obs.shape}): {output_meta_csv}")
-    
+    print(f"Saved: {output_h5ad} (shape {adata.shape})")
+    print(f"Saved: {output_meta_csv} (shape {adata.obs.shape})")
+
     return adata
+
 
 
 def get_sample_labels(meta_df, label_col='subclass_label'):
