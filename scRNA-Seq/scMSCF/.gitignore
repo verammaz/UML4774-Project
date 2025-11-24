@@ -1,5 +1,4 @@
 data/
-../random.ipynb
 __pycache__/
 *.pyc
 .DS_Store
