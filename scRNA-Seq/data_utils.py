@@ -50,15 +50,109 @@ def load_metadata(metapath, label_col='subclass_label'):
     return meta
 
 
+def create_balanced_subset_h5ad(
+    expr_path,
+    metadata_path,
+    output_h5ad='subset_balanced_expression.h5ad',
+    output_meta_csv='subset_balanced_metadata.csv',
+    max_cells=5000,
+    celltype_col='subclass_label',
+    random_state=42,
+    chunk_size=1000,
+):
+
+    rng = np.random.default_rng(random_state)
+
+    # Load metadata
+    meta = pd.read_csv(metadata_path)
+    if celltype_col not in meta.columns:
+        raise ValueError(f"{celltype_col} not found in metadata columns")
+    meta['sample_name'] = meta['sample_name'].astype(str).str.strip()
+    meta = meta.set_index('sample_name')
+
+    # Inspect HDF5
+    with h5py.File(expr_path, 'r') as f:
+        n_genes, n_samples = f['data']['counts'].shape
+        print(f"Expression matrix: {n_genes:,} genes × {n_samples:,} cells")
+
+    # Build mapping sample → index
+    print("Building sample name → index map...")
+    sample_to_idx = {}
+    with h5py.File(expr_path, 'r') as f:
+        sample_ds = f['data']['samples']
+        total = len(sample_ds)
+        for start in range(0, total, chunk_size):
+            end = min(start + chunk_size, total)
+            chunk = [s.decode('utf-8').strip() for s in sample_ds[start:end]]
+            for i, name in enumerate(chunk, start):
+                if name in meta.index:
+                    sample_to_idx[name] = i
+
+    print(f"Found {len(sample_to_idx)} overlapping samples")
+    assert len(sample_to_idx) > 0, "No overlapping cells found."
+
+    meta = meta.loc[meta.index.intersection(sample_to_idx.keys())]
+    
+    cell_types = [ct for ct in meta[celltype_col].unique()]
+
+    n_types = len(cell_types)
+    n_per_type = max_cells // n_types
+    print(f"Balanced sampling: {n_per_type} cells per type (target)")
+
+    sampled_cells = []
+    for ct in cell_types:
+        ct_all = meta.index[meta[celltype_col] == ct].tolist()
+        n_pick = min(n_per_type, len(ct_all))  # if fewer exist, take all
+        sampled_ct = rng.choice(ct_all, size=n_pick, replace=False)
+        sampled_cells.extend(sampled_ct)
+
+    print(f"Total sampled: {len(sampled_cells)}")
+
+   
+    subset_idx = [sample_to_idx[s] for s in sampled_cells]
+    subset_idx_sorted = np.sort(subset_idx)
+
+
+    # Load genes
+    with h5py.File(expr_path, 'r') as f:
+        genes = [g.decode('utf-8') for g in f['data']['gene']]
+
+    # Read expression subset
+    print("Reading expression matrix...")
+    chunks = []
+
+    with h5py.File(expr_path, 'r') as f:
+        dset = f['data']['counts']
+        for start in tqdm(range(0, len(subset_idx_sorted), chunk_size)):
+            end = min(start + chunk_size, len(subset_idx_sorted))
+            idx_chunk = subset_idx_sorted[start:end]
+            chunk = dset[:, idx_chunk].T.astype(np.float32)
+            chunks.append(chunk)
+
+    counts_subset = np.vstack(chunks)
+
+    # Build AnnData
+    adata = ad.AnnData(X=counts_subset)
+    adata.var_names = genes
+    adata.obs_names = sampled_cells
+    adata.obs = meta.loc[sampled_cells]
+
+    adata.write(output_h5ad)
+    adata.obs.to_csv(output_meta_csv)
+
+    print(f"Saved: {output_h5ad} (shape {adata.shape})")
+    print(f"Saved: {output_meta_csv} (shape {adata.obs.shape})")
+
+    return adata
 
 def create_proportional_subset_h5ad(
     expr_path,
     metadata_path,
-    output_h5ad='subset_expression.h5ad',
-    output_meta_csv='subset_metadata.csv',
+    output_h5ad='subset_prop_expression.h5ad',
+    output_meta_csv='subset_prop_metadata.csv',
     max_cells=5000,
     celltype_col='subclass_label',
-    min_prop=0.001,
+    min_prop=0.0001,
     random_state=42,
     chunk_size=1000,
 ):
@@ -102,14 +196,17 @@ def create_proportional_subset_h5ad(
     print("Original proportions:")
     print(proportions)
 
-    # Skip small labels
-    valid_labels = [
-        ct for ct in proportions.index
-        if proportions[ct] >= min_prop
-    ]
+    if min_prop is not None:
+        # Skip small labels
+        valid_labels = [
+            ct for ct in proportions.index
+            if proportions[ct] >= min_prop
+        ]
 
-    print(f"Skipping labels: {set(proportions.index) - set(valid_labels)}")
-    print(f"Using labels: {valid_labels} ({len(valid_labels)})")
+        print(f"Skipping labels: {set(proportions.index) - set(valid_labels)}")
+        print(f"Using labels: {valid_labels} ({len(valid_labels)})")
+    else: 
+        valid_labels = valid_labels = [ct for ct in proportions.index]
 
     proportions = proportions.loc[valid_labels]
     type_counts = type_counts.loc[valid_labels]
